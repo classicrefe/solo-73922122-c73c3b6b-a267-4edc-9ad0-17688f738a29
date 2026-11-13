@@ -13,26 +13,38 @@ from typing import List, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
+from catalog import (
+    BasemapCatalog,
+    CatalogConflict,
+    CatalogError,
+    CatalogNotFound,
+    CatalogValidationError,
+)
 from taskmanager import STATUS_DONE, TaskManager
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR.parent / "data"))
 SAMPLES_DIR = Path(os.environ.get("SAMPLES_DIR", DATA_DIR / "samples"))
 TASKS_ROOT = DATA_DIR / "tasks"
+BASEMAPS_DIR = Path(os.environ.get("BASEMAPS_DIR", DATA_DIR / "basemaps"))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "2"))
 MAX_INPUTS = 4
 SAMPLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.tiff?$", re.IGNORECASE)
 
 manager: TaskManager
+catalog: BasemapCatalog
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager
+    global manager, catalog
     TASKS_ROOT.mkdir(parents=True, exist_ok=True)
     SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     manager = TaskManager(TASKS_ROOT, max_parallel=MAX_PARALLEL)
-    manager.cleanup_stale()
+    manager.cleanup_stale()  # 只清任务暂存;底图库目录不受影响
+    BASEMAPS_DIR.mkdir(parents=True, exist_ok=True)
+    catalog = BasemapCatalog(BASEMAPS_DIR)
+    catalog.initialize()  # 建库/迁移 + 清理上次未发布的残留
     yield
 
 
@@ -44,6 +56,11 @@ app = FastAPI(title="DEM 拼接服务", lifespan=lifespan)
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return (BASE_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/basemaps", response_class=HTMLResponse)
+async def basemaps_page():
+    return (BASE_DIR / "static" / "basemaps.html").read_text(encoding="utf-8")
 
 
 @app.get("/healthz")
@@ -162,6 +179,88 @@ async def download(task_id: str):
     if not path.is_file():
         raise HTTPException(410, "结果文件已不存在")
     return FileResponse(path, media_type="image/tiff", filename=f"mosaic_{t.id}.tif")
+
+
+# ---------- 底图库 ----------
+
+def _publish_error(e: Exception) -> HTTPException:
+    if isinstance(e, CatalogConflict):
+        headers = {}
+        if e.current_revision is not None:
+            headers["X-Current-Revision"] = str(e.current_revision)
+        return HTTPException(409, str(e), headers=headers)
+    if isinstance(e, CatalogNotFound):
+        return HTTPException(404, str(e))
+    if isinstance(e, CatalogValidationError):
+        return HTTPException(400, str(e))
+    if isinstance(e, CatalogError):
+        return HTTPException(500, str(e))
+    return HTTPException(500, f"底图库内部错误: {e!r}")
+
+
+@app.get("/api/basemaps")
+async def list_basemaps():
+    return catalog.list_basemaps()
+
+
+@app.get("/api/basemaps/{basemap_id}")
+async def get_basemap(basemap_id: int):
+    try:
+        return catalog.get_basemap(basemap_id)
+    except CatalogError as e:
+        raise _publish_error(e)
+
+
+@app.get("/api/basemaps/{basemap_id}/revisions/{revision}/download")
+async def download_basemap_revision(basemap_id: int, revision: int):
+    """下载固定修订。换版只改数据库指针,旧 blob 不变,在途下载不受影响。"""
+    try:
+        info, path = catalog.get_revision(basemap_id, revision)
+    except CatalogError as e:
+        raise _publish_error(e)
+    if not path.is_file():
+        raise HTTPException(410, "该修订的底图文件已不存在")
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", info["name"]).strip("._") or "basemap"
+    return FileResponse(
+        path,
+        media_type="image/tiff",
+        filename=f"{safe_stem}_r{revision}.tif",
+    )
+
+
+@app.post("/api/basemaps")
+async def publish_basemap(
+    name: str = Form(...),
+    task_id: str = Form(...),
+    expected_revision: Optional[int] = Form(default=None),
+):
+    """从成功任务发布首版或替换底图。
+
+    首次发布不得与已有名称重复;替换必须携带调用方所见修订号,
+    过期则 409 且原版不变。
+    """
+    t = manager.tasks.get(task_id)
+    if t is None:
+        raise HTTPException(404, "来源任务不存在")
+    if t.status != STATUS_DONE or not t.result:
+        raise HTTPException(409, "只有成功完成的任务才能发布底图")
+    source = t.workdir / "result.tif"
+    if not source.is_file():
+        raise HTTPException(410, "任务结果文件已不存在")
+    try:
+        public, created = await asyncio.to_thread(
+            catalog.publish,
+            name,
+            source,
+            t.id,
+            t.result,
+            expected_revision,
+        )
+    except CatalogError as e:
+        raise _publish_error(e)
+    except Exception as e:
+        raise _publish_error(e)
+    return {"created": created, "basemap": public}
 
 
 # ---------- 工具 ----------

@@ -49,8 +49,13 @@
 </head>
 <body>
 <header>
-  <h1>航测 DEM 拼接服务</h1>
-  <p>最多 4 份单波段 GeoTIFF → 统一重投影 EPSG:3857 → 镶嵌 → 带概览 COG。重叠处列表靠后的文件优先,NoData 不覆盖已有高程。</p>
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap">
+    <div>
+      <h1>航测 DEM 拼接服务</h1>
+      <p>最多 4 份单波段 GeoTIFF → 统一重投影 EPSG:3857 → 镶嵌 → 带概览 COG。重叠处列表靠后的文件优先,NoData 不覆盖已有高程。</p>
+    </div>
+    <a href="/basemaps" style="color:#cfe4f8;font-size:13px;white-space:nowrap">底图库 →</a>
+  </div>
 </header>
 <main>
   <section class="card">

@@ -20,6 +20,7 @@ COPY samples/ /samples/
 
 ENV DATA_DIR=/data \
     SAMPLES_DIR=/data/samples \
+    BASEMAPS_DIR=/data/basemaps \
     MAX_PARALLEL=2
 
 EXPOSE 8000

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>底图库 · 长期 GIS 底图</title>
+<style>
+  :root { --bd:#d0d7de; --bg:#f6f8fa; --fg:#1f2328; --mut:#57606a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI","Noto Sans SC",sans-serif; color:var(--fg); background:var(--bg); }
+  header { background:#0b3d66; color:#fff; padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; font-size:12px; opacity:.85; }
+  header a { color:#cfe4f8; font-size:13px; }
+  main { max-width:1000px; margin:18px auto; padding:0 16px; }
+  .card { background:#fff; border:1px solid var(--bd); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  .hint { color:var(--mut); font-size:12px; }
+  button { cursor:pointer; border:1px solid var(--bd); background:#f6f8fa; border-radius:6px; padding:4px 10px; font-size:13px; }
+  button:hover { background:#eaeef2; }
+  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; padding:7px 18px; font-size:14px; }
+  button.primary:hover { background:#1a62d0; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=text], select { padding:6px 8px; border:1px solid var(--bd); border-radius:6px; font-size:14px; }
+  input[type=text] { width:260px; }
+  select { max-width:420px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .msg { font-size:13px; margin-top:8px; white-space:pre-wrap; }
+  .msg.ok { color:#116329; }
+  .msg.err { color:#a40e26; }
+  .bm { border:1px solid var(--bd); border-radius:8px; background:#fff; padding:12px 14px; margin-bottom:10px; }
+  .bm .head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .bm .nm { font-weight:600; font-size:15px; word-break:break-all; }
+  .rev { font-size:12px; font-weight:600; padding:2px 10px; border-radius:12px; background:#dafbe1; color:#116329; }
+  .meta { color:var(--mut); font-size:12px; margin-top:6px; word-break:break-all; }
+  a.dl { display:inline-block; margin-top:8px; background:#1a7f37; color:#fff; text-decoration:none; padding:5px 14px; border-radius:6px; font-size:13px; }
+  a.dl:hover { background:#116329; }
+  .rep { background:#f6f8fa; border:1px dashed var(--bd); border-radius:6px; padding:8px 10px; margin-top:10px; }
+  .rep .row { margin-top:6px; }
+  .hist { margin-top:8px; font-size:12px; color:var(--mut); }
+  .hist a { color:#0550ae; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>底图库</h1>
+    <p>把已确认的拼接成果保存为长期 GIS 底图。首次发布名称不可重复;替换须基于所见修订。</p>
+  </div>
+  <a href="/">← 返回拼接任务</a>
+</header>
+<main>
+  <section class="card">
+    <h2>从成功任务发布</h2>
+    <div class="hint">仅列出已成功完成且结果可用的任务。首次发布时底图名称不能已存在。</div>
+    <div class="row">
+      <label>成功任务: <select id="taskSelect"><option value="">加载中…</option></select></label>
+    </div>
+    <div class="row">
+      <label>底图名称: <input type="text" id="bmName" maxlength="120" placeholder="例如 city-dem-2026"></label>
+      <button class="primary" id="publishBtn" type="button">发布为新底图</button>
+      <button id="refreshBtn" type="button">刷新</button>
+    </div>
+    <div class="msg" id="publishMsg"></div>
+  </section>
+
+  <section>
+    <h2 style="font-size:15px">已发布底图</h2>
+    <div class="hint" style="margin-bottom:8px">每个修订对应一份不可变 COG;替换后旧链接仍可下载原修订。</div>
+    <div id="basemaps"><div class="hint">加载中…</div></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+function esc(s){
+  return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'",'&#39;');
+}
+function fmtBytes(n){ return n>1048576 ? (n/1048576).toFixed(1)+' MB' : (n/1024).toFixed(1)+' KB'; }
+function fmtExtent(e){ return Array.isArray(e) ? e.map(v=>Number(v).toFixed(2)).join(', ') : ''; }
+
+let doneTasks = [];
+let allBasemaps = [];
+
+async function loadTasks(){
+  const sel = $('taskSelect');
+  try{
+    const r = await fetch('/api/tasks');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const arr = await r.json();
+    doneTasks = arr.filter(t=>t.status==='DONE' && t.result && t.download_url);
+    if(!doneTasks.length){
+      sel.innerHTML = '<option value="">(暂无成功任务,请先在拼接页完成任务)</option>';
+      return;
+    }
+    const prev = sel.value;
+    sel.innerHTML = doneTasks.map(t=>{
+      const r=t.result;
+      return `<option value="${esc(t.id)}">#${esc(t.id)} · ${r.width}×${r.height} · ${fmtBytes(r.file_size_bytes)} · ${new Date(t.created_at*1000).toLocaleString()}</option>`;
+    }).join('');
+    if(doneTasks.some(t=>t.id===prev)) sel.value = prev;
+  }catch(e){
+    sel.innerHTML = '<option value="">任务列表加载失败</option>';
+  }
+}
+
+function taskOptions(selectedId){
+  return doneTasks.map(t=>{
+    const r=t.result;
+    return `<option value="${esc(t.id)}" ${t.id===selectedId?'selected':''}>#${esc(t.id)} · ${r.width}×${r.height} · ${fmtBytes(r.file_size_bytes)}</option>`;
+  }).join('');
+}
+
+function basemapHtml(b){
+  const revUrl = b.download_url;
+  const hist = (b.revisions||[]).map(r=>
+    `<div>r${r.revision}${r.is_current?'(当前)':''} · ${r.width}×${r.height} · ${fmtBytes(r.size_bytes)} · 来源任务 #${esc(r.source_task_id)} · <a href="${esc(r.download_url)}">下载</a></div>`
+  ).join('');
+  const disabled = doneTasks.length ? '' : 'disabled';
+  return `<div class="bm">
+    <div class="head">
+      <span class="nm">${esc(b.name)}</span>
+      <span class="rev">当前修订 r${b.revision}</span>
+    </div>
+    <div class="meta">尺寸 ${b.width} × ${b.height} 像元 · 范围(${esc(b.crs)}, 米): [${esc(fmtExtent(b.extent))}] · ${fmtBytes(b.size_bytes)}<br>
+      来源任务 #${esc(b.source_task_id)} · 更新于 ${new Date(b.updated_at*1000).toLocaleString()}</div>
+    <a class="dl" href="${esc(revUrl)}">下载当前 COG</a>
+    <div class="rep">
+      <div class="hint">替换必须携带当前所见修订 <b>r${b.revision}</b>;若他人已先行替换,本次将返回 409 且原版不变。</div>
+      <div class="row">
+        <select class="repTask" data-bid="${b.id}">${taskOptions('')}</select>
+        <button type="button" data-id="${b.id}" data-rev="${b.revision}" ${disabled}
+          onclick="replaceBasemap(this)">用所选任务替换</button>
+      </div>
+    </div>
+    <details class="hist"><summary>修订历史(${(b.revisions||[]).length})</summary>${hist}</details>
+  </div>`;
+}
+
+async function loadBasemaps(){
+  const box = $('basemaps');
+  try{
+    const r = await fetch('/api/basemaps');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const arr = await r.json();
+    allBasemaps = arr;
+    // 轮询刷新时保留用户在各"替换"下拉框中的选择
+    const chosen = {};
+    box.querySelectorAll('.repTask').forEach(s=>{ if(s.value) chosen[s.dataset.bid] = s.value; });
+    box.innerHTML = arr.length ? arr.map(basemapHtml).join('') : '<div class="hint">底图库为空</div>';
+    box.querySelectorAll('.repTask').forEach(s=>{
+      if(chosen[s.dataset.bid]) s.value = chosen[s.dataset.bid];
+    });
+  }catch(e){
+    box.innerHTML = `<div class="hint">底图库加载失败: ${esc(e)}</div>`;
+  }
+}
+
+async function publish(name, taskId, expected){
+  const body = new FormData();
+  body.append('name', name);
+  body.append('task_id', taskId);
+  if(expected !== null && expected !== undefined) body.append('expected_revision', expected);
+  const r = await fetch('/api/basemaps', {method:'POST', body});
+  let j = null;
+  try { j = await r.json(); } catch(e) { /* 忽略非 JSON 错误页 */ }
+  return {ok:r.ok, status:r.status, json:j, currentRev:r.headers.get('X-Current-Revision')};
+}
+
+async function publishBasemap(){
+  const msg = $('publishMsg'); msg.className='msg'; msg.textContent='';
+  const name = $('bmName').value.trim();
+  const taskId = $('taskSelect').value;
+  if(!name){ msg.className='msg err'; msg.textContent='请填写底图名称'; return; }
+  if(!taskId){ msg.className='msg err'; msg.textContent='请选择一个成功任务'; return; }
+  $('publishBtn').disabled = true;
+  try{
+    const {ok, status, json} = await publish(name, taskId, null);
+    if(ok){
+      msg.className='msg ok';
+      msg.textContent = `已发布「${json.basemap.name}」修订 r${json.basemap.revision}`;
+      $('bmName').value='';
+    }else if(status===409){
+      msg.className='msg err';
+      msg.textContent = `发布冲突(409):${(json&&json.detail)||'名称已存在'}`;
+    }else{
+      msg.className='msg err';
+      msg.textContent = `发布失败(${status}):${(json&&json.detail)||'未知错误'}`;
+    }
+    await loadBasemaps();
+  }catch(e){
+    msg.className='msg err'; msg.textContent='发布失败: '+e;
+  }finally{ $('publishBtn').disabled=false; }
+}
+
+async function replaceBasemap(btn){
+  const id = btn.dataset.id, rev = parseInt(btn.dataset.rev, 10);
+  const cur = allBasemaps.find(b=>String(b.id)===String(id));
+  const name = cur && cur.name;
+  const sel = document.querySelector(`.repTask[data-bid="${id}"]`);
+  const taskId = sel && sel.value;
+  if(!name){ alert('底图已不存在,请刷新'); return; }
+  if(!taskId){ alert('请先选择一个成功任务'); return; }
+  btn.disabled = true;
+  try{
+    const {ok, status, json, currentRev} = await publish(name, taskId, rev);
+    if(ok){
+      alert(`已将「${json.basemap.name}」替换为修订 r${json.basemap.revision}(来源任务 #${taskId})`);
+    }else if(status===409){
+      alert(`替换冲突(409):${(json&&json.detail)||'修订已过期'}\n当前修订: r${currentRev||'?'}\n原底图保持不变,请刷新后再操作。`);
+    }else{
+      alert(`替换失败(${status}):${(json&&json.detail)||'未知错误'}`);
+    }
+  }catch(e){ alert('替换失败: '+e); }
+  finally{ btn.disabled=false; await loadBasemaps(); }
+}
+
+$('publishBtn').addEventListener('click', publishBasemap);
+$('refreshBtn').addEventListener('click', ()=>{ loadTasks(); loadBasemaps(); });
+
+loadTasks().then(loadBasemaps);
+setInterval(loadBasemaps, 5000);
+</script>
+</body>
+</html>
